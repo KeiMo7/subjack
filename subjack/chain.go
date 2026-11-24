@@ -3,30 +3,32 @@ package subjack
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 )
 
 const maxCNAMEDepth = 10
 
-// checkCNAMEChain follows the full CNAME chain and checks if any intermediate
-// or terminal target is an NXDOMAIN with a registrable domain.
 func checkCNAMEChain(domain string, o *Options) {
-	timeout := time.Duration(o.Timeout) * time.Second
+	checkCNAMEChainCtx(domain, newDomainCtx(o, nil, domain))
+}
+
+// checkCNAMEChainCtx follows the full CNAME chain and checks if any
+// intermediate or terminal target is an NXDOMAIN with a registrable domain.
+func checkCNAMEChainCtx(domain string, dc *domainCtx) {
 	var chain []string
 	current := domain
 
 	for i := 0; i < maxCNAMEDepth; i++ {
 		msg := new(dns.Msg)
 		msg.SetQuestion(dns.Fqdn(current), dns.TypeCNAME)
-		resp, err := dnsExchange(msg, o.resolvers, timeout)
-		if err != nil {
+		res := dc.exchange(msg)
+		if res.failed() {
 			break
 		}
 
 		var target string
-		for _, a := range resp.Answer {
+		for _, a := range res.msg.Answer {
 			if t, ok := a.(*dns.CNAME); ok {
 				target = t.Target
 				break
@@ -53,23 +55,37 @@ func checkCNAMEChain(domain string, o *Options) {
 			continue
 		}
 
-		if isNXDOMAIN(link, o) && o.domainAvailable(strings.TrimSuffix(link, ".")) {
+		nx, res := dc.isNX(link)
+		if nx && dc.o.domainAvailable(strings.TrimSuffix(link, ".")) {
 			service := "CNAME CHAIN TAKEOVER"
 			chainStr := domain + " -> " + strings.Join(chain[:i+1], " -> ")
 			detail := fmt.Sprintf("%s - %s is available for registration (chain: %s)", domain, link, chainStr)
-			fmt.Printf("[%s%s%s] %s\n", colorGreen, service, colorReset, detail)
-			if o.Output != "" {
-				msg := fmt.Sprintf("[%s] %s\n", service, detail)
-				writeOutput(service, domain, msg, o.Output)
-			}
+			dc.emit(Finding{
+				Service: service,
+				URL:     domain,
+				Detail:  detail,
+				Verdict: VerdictVulnerable,
+				Ev: &Evidence{
+					Resolver: res.resolver,
+					Fallback: res.fallback,
+					Rcode:    rcodeName(res),
+					CNAME:    link,
+					Chain:    append([]string{domain}, chain[:i+1]...),
+					Reason:   fmt.Sprintf("chain link %s is NXDOMAIN and available for registration", link),
+				},
+			})
 			return
 		}
 	}
 }
 
-// checkSRV looks up common SRV records and checks if any targets are
-// expired or available for registration.
 func checkSRV(domain string, o *Options) {
+	checkSRVCtx(domain, newDomainCtx(o, nil, domain))
+}
+
+// checkSRVCtx looks up common SRV records and checks if any targets are
+// expired or available for registration.
+func checkSRVCtx(domain string, dc *domainCtx) {
 	srvPrefixes := []string{
 		"_sip._tcp.",
 		"_sip._udp.",
@@ -100,18 +116,16 @@ func checkSRV(domain string, o *Options) {
 		"_mta-sts._tcp.",
 	}
 
-	timeout := time.Duration(o.Timeout) * time.Second
-
 	for _, prefix := range srvPrefixes {
 		qname := prefix + domain
 		msg := new(dns.Msg)
 		msg.SetQuestion(dns.Fqdn(qname), dns.TypeSRV)
-		resp, err := dnsExchange(msg, o.resolvers, timeout)
-		if err != nil {
+		res := dc.exchange(msg)
+		if res.failed() {
 			continue
 		}
 
-		for _, a := range resp.Answer {
+		for _, a := range res.msg.Answer {
 			srv, ok := a.(*dns.SRV)
 			if !ok {
 				continue
@@ -121,14 +135,23 @@ func checkSRV(domain string, o *Options) {
 				continue
 			}
 
-			if isNXDOMAIN(target, o) && o.domainAvailable(strings.TrimSuffix(target, ".")) {
+			nx, nxres := dc.isNX(target)
+			if nx && dc.o.domainAvailable(strings.TrimSuffix(target, ".")) {
 				service := "SRV TAKEOVER"
 				detail := fmt.Sprintf("%s - SRV %s points to %s which is available for registration", domain, prefix, target)
-				fmt.Printf("[%s%s%s] %s\n", colorGreen, service, colorReset, detail)
-				if o.Output != "" {
-					msg := fmt.Sprintf("[%s] %s\n", service, detail)
-					writeOutput(service, domain, msg, o.Output)
-				}
+				dc.emit(Finding{
+					Service: service,
+					URL:     domain,
+					Detail:  detail,
+					Verdict: VerdictVulnerable,
+					Ev: &Evidence{
+						Resolver: nxres.resolver,
+						Fallback: nxres.fallback,
+						Rcode:    rcodeName(nxres),
+						CNAME:    target,
+						Reason:   fmt.Sprintf("SRV %s target %s is NXDOMAIN and available for registration", prefix, target),
+					},
+				})
 			}
 		}
 	}

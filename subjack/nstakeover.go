@@ -67,11 +67,16 @@ func identifyDNSProvider(ns string) string {
 	return ""
 }
 
-// checkDanglingNS looks for dangling NS delegations to cloud DNS providers.
-// If a domain's nameservers belong to a cloud provider but the hosted zone
-// has been deleted, direct SOA queries will return SERVFAIL or REFUSED.
 func checkDanglingNS(domain string, o *Options) {
-	nameservers := lookupNS(domain, o)
+	checkDanglingNSCtx(domain, newDomainCtx(o, nil, domain))
+}
+
+// checkDanglingNSCtx looks for dangling NS delegations to cloud DNS
+// providers. If a domain's nameservers belong to a cloud provider but the
+// hosted zone has been deleted, direct SOA queries will return SERVFAIL or
+// REFUSED.
+func checkDanglingNSCtx(domain string, dc *domainCtx) {
+	nameservers := lookupNSCtx(domain, dc)
 	if len(nameservers) == 0 {
 		return
 	}
@@ -90,9 +95,7 @@ func checkDanglingNS(domain string, o *Options) {
 		return
 	}
 
-	timeout := time.Duration(o.Timeout) * time.Second
-
-	if !allNSFailSOA(domain, cloudNSes, timeout) {
+	if !allNSFailSOA(domain, cloudNSes, dc.o.timeout()) {
 		return
 	}
 
@@ -100,11 +103,15 @@ func checkDanglingNS(domain string, o *Options) {
 	nsList := strings.Join(cloudNSes, ", ")
 	detail := fmt.Sprintf("%s - dangling %s delegation (%s)", domain, provider, nsList)
 
-	fmt.Printf("[%s%s%s] %s\n", colorGreen, service, colorReset, detail)
-	if o.Output != "" {
-		msg := fmt.Sprintf("[%s] %s\n", service, detail)
-		writeOutput(service, domain, msg, o.Output)
-	}
+	dc.emit(Finding{
+		Service: service,
+		URL:     domain,
+		Detail:  detail,
+		Verdict: VerdictVulnerable,
+		Ev: &Evidence{
+			Reason: fmt.Sprintf("all %s nameservers fail SOA queries for the zone (SERVFAIL/REFUSED)", provider),
+		},
+	})
 }
 
 // allNSFailSOA reports whether every authoritative server refuses or fails

@@ -42,5 +42,5 @@ func main() {
 		os.Exit(1)
 	}
 
-	subjack.Process(&o)
+	os.Exit(subjack.Process(&o))
 }

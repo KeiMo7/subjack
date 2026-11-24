@@ -137,15 +137,19 @@ func identifyProvider(ip net.IP) string {
 }
 
 func resolveA(domain string, o *Options) []net.IP {
+	return resolveACtx(domain, newDomainCtx(o, nil, domain))
+}
+
+func resolveACtx(domain string, dc *domainCtx) []net.IP {
 	msg := new(dns.Msg)
-	msg.SetQuestion(domain+".", dns.TypeA)
-	resp, err := dnsExchange(msg, o.resolvers, time.Duration(o.Timeout)*time.Second)
-	if err != nil {
+	msg.SetQuestion(dns.Fqdn(domain), dns.TypeA)
+	res := dc.exchange(msg)
+	if res.failed() {
 		return nil
 	}
 
 	var ips []net.IP
-	for _, a := range resp.Answer {
+	for _, a := range res.msg.Answer {
 		if t, ok := a.(*dns.A); ok {
 			ips = append(ips, t.A)
 		}
@@ -215,31 +219,39 @@ func icmpChecksum(data []byte) uint16 {
 }
 
 func checkARecord(domain string, o *Options) {
-	ips := resolveA(domain, o)
+	checkARecordCtx(domain, newDomainCtx(o, nil, domain))
+}
+
+func checkARecordCtx(domain string, dc *domainCtx) {
+	ips := resolveACtx(domain, dc)
 	if len(ips) == 0 {
 		return
 	}
 
-	timeout := time.Duration(o.Timeout) * time.Second
+	timeout := dc.o.timeout()
 	for _, ip := range ips {
 		if !isHostDead(ip.String(), timeout) {
 			continue
 		}
 
 		provider := identifyProvider(ip)
-		var service, detail string
+		var detail string
 		if provider != "" {
-			service = "STALE A RECORD"
 			detail = fmt.Sprintf("%s (%s) - IP %s appears dead", domain, provider, ip)
 		} else {
-			service = "STALE A RECORD"
 			detail = fmt.Sprintf("%s - IP %s appears dead", domain, ip)
 		}
 
-		fmt.Printf("[%s%s%s] %s\n", colorGreen, service, colorReset, detail)
-		if o.Output != "" {
-			msg := fmt.Sprintf("[%s] %s\n", service, detail)
-			writeOutput(service, domain, msg, o.Output)
+		reason := fmt.Sprintf("A record %s does not answer ICMP or TCP 80/443", ip)
+		if provider != "" {
+			reason = fmt.Sprintf("%s IP %s does not answer ICMP or TCP 80/443", provider, ip)
 		}
+		dc.emit(Finding{
+			Service: "STALE A RECORD",
+			URL:     domain,
+			Detail:  detail,
+			Verdict: VerdictVulnerable,
+			Ev:      &Evidence{Reason: reason},
+		})
 	}
 }

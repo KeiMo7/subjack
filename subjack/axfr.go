@@ -28,24 +28,28 @@ var nsPrefixes = []string{
 	"pdns1", "pdns2",
 }
 
-// checkAXFR attempts zone transfers against a domain's nameservers
-// and bruteforced nameserver hostnames.
 func checkAXFR(domain string, o *Options) {
+	checkAXFRCtx(domain, newDomainCtx(o, nil, domain))
+}
+
+// checkAXFRCtx attempts zone transfers against a domain's nameservers
+// and bruteforced nameserver hostnames.
+func checkAXFRCtx(domain string, dc *domainCtx) {
 	// Extract the base domain for NS bruteforcing
 	baseDomain := getBaseDomain(domain)
-	timeout := time.Duration(o.Timeout) * time.Second
+	timeout := dc.o.timeout()
 
 	// 1. Try AXFR against actual NS records
-	for _, ns := range lookupNS(domain, o) {
-		if tryAXFR(domain, withDNSPort(ns), timeout, o) {
+	for _, ns := range lookupNSCtx(domain, dc) {
+		if tryAXFRCtx(domain, withDNSPort(ns), timeout, dc) {
 			return
 		}
 	}
 
 	// Also try NS records of the base domain if different
 	if baseDomain != domain {
-		for _, ns := range lookupNS(baseDomain, o) {
-			if tryAXFR(domain, withDNSPort(ns), timeout, o) {
+		for _, ns := range lookupNSCtx(baseDomain, dc) {
+			if tryAXFRCtx(domain, withDNSPort(ns), timeout, dc) {
 				return
 			}
 		}
@@ -58,12 +62,12 @@ func checkAXFR(domain string, o *Options) {
 		if err != nil || len(ips) == 0 {
 			continue
 		}
-		if tryAXFR(domain, withDNSPort(candidate), timeout, o) {
+		if tryAXFRCtx(domain, withDNSPort(candidate), timeout, dc) {
 			return
 		}
 		// Also try AXFR for the base domain on this NS
 		if baseDomain != domain {
-			if tryAXFR(baseDomain, withDNSPort(candidate), timeout, o) {
+			if tryAXFRCtx(baseDomain, withDNSPort(candidate), timeout, dc) {
 				return
 			}
 		}
@@ -71,6 +75,10 @@ func checkAXFR(domain string, o *Options) {
 }
 
 func tryAXFR(domain, nsHost string, timeout time.Duration, o *Options) bool {
+	return tryAXFRCtx(domain, nsHost, timeout, newDomainCtx(o, nil, domain))
+}
+
+func tryAXFRCtx(domain, nsHost string, timeout time.Duration, dc *domainCtx) bool {
 	transfer := &dns.Transfer{
 		DialTimeout:  timeout,
 		ReadTimeout:  timeout,
@@ -108,11 +116,15 @@ func tryAXFR(domain, nsHost string, timeout time.Duration, o *Options) bool {
 	service := "ZONE TRANSFER"
 	detail := fmt.Sprintf("%s - AXFR successful on %s (%d records)", domain, nsHost, len(records))
 
-	fmt.Printf("[%s%s%s] %s\n", colorGreen, service, colorReset, detail)
-	if o.Output != "" {
-		msg := fmt.Sprintf("[%s] %s\n", service, detail)
-		writeOutput(service, domain, msg, o.Output)
-	}
+	dc.emit(Finding{
+		Service: service,
+		URL:     domain,
+		Detail:  detail,
+		Verdict: VerdictVulnerable,
+		Ev: &Evidence{
+			Reason: fmt.Sprintf("nameserver %s allowed a zone transfer of %d records", nsHost, len(records)),
+		},
+	})
 	return true
 }
 
